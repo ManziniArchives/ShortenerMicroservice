@@ -1,107 +1,82 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const bodyParser = require('body-parser');
+const mongoose = require('mongoose');
+const dns = require('dns');
+const { promisify } = require('util');
+const lookup = promisify(dns.lookup);
+
 const app = express();
-let mongoose = require('mongoose');
-let bodyParser = require('body-parser');
-const dns = require('node:dns');
+const PORT = process.env.PORT || 3000;
 
-mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-
-// Basic Configuration
-const port = process.env.PORT || 3000;
-
-const URLSchema = new mongoose.Schema({
-  original_url: {type: String, required: true, unique: true},
-  short_url: {type: String, required: true, unique: true}
-});
-
-let URLModel = mongoose.model("url", URLSchema);
-
-// Middleware function to parse post requests
-app.use("/", bodyParser.urlencoded({ extended: false }));
-
+/* ---------- middleware ---------- */
 app.use(cors());
-
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(express.json());
 app.use('/public', express.static(`${process.cwd()}/public`));
 
-app.get('/', function(req, res) {
-  res.sendFile(process.cwd() + '/views/index.html');
+/* ---------- mongoose ---------- */
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
 });
+const urlSchema = new mongoose.Schema({
+  original_url: { type: String, required: true }
+});
+const Url = mongoose.model('Url', urlSchema);
 
-app.get('/api/shorturl/:short_url', function(req, res) {
-  let short_url = req.params.short_url;
-  // Find the original url from the database
-  URLModel.findOne({short_url: short_url}).then((foundURL) => {
-    if (foundURL){
-      let original_url = foundURL.original_url;
-      res.redirect(original_url);
-    } else {
-      res.json({message: "The short url does not exist!"});
-    }
-  });
-})
-
-// Your first API endpoint
-app.post('/api/shorturl', function(req, res) {
-  let url = req.body.url;
-  // Validate the URL
+/* ---------- helpers ---------- */
+function isValidHttpUrl(str) {
   try {
-    urlObj = new URL(url);
-    // Validate DNS Domain
-    dns.lookup(urlObj.hostname, (err, address, family) => {
-      // If the DNS domain does not exist no address returned
-      if (!address){
-        res.json({ error: 'invalid url' })
-      } 
-      // We have a valid URL!
-      else {
-        let original_url = urlObj.href;
-        // Check that URL does not already exist in database 
-        URLModel.findOne({original_url: original_url}).then(
-          (foundURL) => {
-            if (foundURL) {
-              res.json(
-                {
-                  original_url: foundURL.original_url,
-                  short_url: foundURL.short_url
-                })
-          } 
-          // If URL does not exist create a new short url and 
-          // add it to the database
-          else {
-            let short_url = 1;
-            // Get the latest short_url
-            URLModel.find({}).sort(
-              {short_url: "desc"}).limit(1).then(
-                (latestURL) => {
-                if (latestURL.length > 0){
-                  // Increment the latest short url by adding 1
-                  short_url = parseInt(latestURL[0].short_url) + 1;
-                }
-                resObj = {
-                  original_url: original_url,
-                  short_url: short_url
-                }
-                
-                // Create an entry in the database
-                let newURL = new URLModel(resObj);
-                newURL.save();
-                res.json(resObj);
-                
-                }
-            )
-          }
-        })
-      }
-    })
+    const url = new URL(str);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
   }
-  // If the url has an invalid format
-  catch {
-    res.json({ error: 'invalid url' })
+}
+
+/* ---------- routes ---------- */
+app.get('/', (req, res) => {
+  res.sendFile(`${process.cwd()}/views/index.html`);
+});
+
+/* POST /api/shorturl */
+app.post('/api/shorturl', async (req, res) => {
+  const { url } = req.body;
+  if (!isValidHttpUrl(url)) {
+    return res.json({ error: 'invalid url' });
+  }
+
+  try {
+    // Verify host is reachable
+    const { hostname } = new URL(url);
+    await lookup(hostname);
+
+    // Save or retrieve
+    let doc = await Url.findOne({ original_url: url });
+    if (!doc) {
+      doc = await Url.create({ original_url: url });
+    }
+    res.json({ original_url: doc.original_url, short_url: doc._id });
+  } catch (err) {
+    res.json({ error: 'invalid url' });
   }
 });
 
-app.listen(port, function() {
-  console.log(`Listening on port ${port}`);
+/* GET /api/shorturl/:short_url */
+app.get('/api/shorturl/:short_url', async (req, res) => {
+  const { short_url } = req.params;
+  try {
+    const doc = await Url.findById(short_url);
+    if (!doc) return res.json({ error: 'invalid url' });
+    res.redirect(doc.original_url);
+  } catch {
+    res.json({ error: 'invalid url' });
+  }
+});
+
+/* ---------- start ---------- */
+app.listen(PORT, () => {
+  console.log(`Listening on port ${PORT}`);
 });
